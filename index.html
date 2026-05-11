@@ -79,6 +79,7 @@
          
          let ai4Mode = "TREND"; 
          let ai4LossStreak = 0;
+         let ai4CycleStep = 0; 
 
          async function initApp() {
             await fetchAndRecoverData();
@@ -90,31 +91,26 @@
                const response = await fetch(`${API_URL}?t=${Date.now()}`);
                const data = await response.json();
                const list = data.data.list;
-               
                document.getElementById('total-count').textContent = list.length;
                
-               // Recovery Logic: History mein missing data bharna
                list.slice().reverse().forEach(item => {
                   if (!historyDB.find(x => x.period === item.issueNumber)) {
-                     const size = parseInt(item.number) <= 4 ? 'SMALL' : 'BIG';
                      historyDB.unshift({
                         period: item.issueNumber,
                         prediction: '---', 
                         numbers: [],
-                        status: 'DATA', // Pehle ke periods ko DATA dikhayega
+                        status: 'DATA',
                         actualNum: item.number,
                         ai4Vote: 'UNKNOWN'
                      });
                   }
                });
-
                if (historyDB.length > 50) historyDB = historyDB.slice(0, 50);
                localStorage.setItem('genesis_v8_db', JSON.stringify(historyDB));
-               
                renderHistory();
                runCalculatorAI(list);
                lastProcessed = list[0].issueNumber;
-            } catch (e) { console.error("Recovery Error"); }
+            } catch (e) {}
          }
 
          async function syncEngine() {
@@ -130,6 +126,29 @@
             } catch (e) {}
          }
 
+         function getSmartNumbers(list, verdict) {
+            const last10 = list.slice(0, 10).map(x => parseInt(x.number));
+            const range = verdict === 'BIG' ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
+            
+            const counts = {};
+            range.forEach(n => counts[n] = 0);
+            last10.forEach(n => { if(range.includes(n)) counts[n]++; });
+
+            const sorted = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+            
+            let high = parseInt(sorted[0]); // Most frequent
+            let low = parseInt(sorted[sorted.length - 1]); // Least frequent/None
+
+            // Fallback random agar kuch na mile
+            if (isNaN(high)) high = range[Math.floor(Math.random() * range.length)];
+            if (isNaN(low) || low === high) {
+               const remaining = range.filter(n => n !== high);
+               low = remaining[Math.floor(Math.random() * remaining.length)];
+            }
+
+            return [high, low];
+         }
+
          function runCalculatorAI(list) {
             const rawData = list.map(x => ({ 
                num: parseInt(x.number), 
@@ -138,22 +157,14 @@
             const nextP = (BigInt(list[0].issueNumber) + 1n).toString();
             const results = rawData.map(x => x.size);
 
-            // AI 1: Patterns
             let ai1Vote = results[0]; 
-            if (results[0] === results[1]) ai1Vote = results[0]; // Dragon
-            else if (results[0] !== results[1] && results[1] !== results[2]) ai1Vote = results[0] === 'BIG' ? 'SMALL' : 'BIG'; // Zig-Zag
-            else if (results[1] === results[2] && results[0] !== results[1]) ai1Vote = results[0] === 'BIG' ? 'SMALL' : 'BIG'; // Break Zig-Zag
-            if (results[0] === results[1] && results[2] === results[3] && results[0] !== results[2]) ai1Vote = results[0] === 'BIG' ? 'SMALL' : 'BIG'; // Mirror
+            if (results[0] === results[1]) ai1Vote = results[0]; 
+            else if (results[0] !== results[1] && results[1] !== results[2]) ai1Vote = results[0] === 'BIG' ? 'SMALL' : 'BIG'; 
+            if (results[0] === results[1] && results[2] === results[3] && results[0] !== results[2]) ai1Vote = results[0] === 'BIG' ? 'SMALL' : 'BIG';
 
-            // AI 2: Digit Logic
-            const lastDigit = parseInt(list[0].number);
-            let ai2Vote = (lastDigit <= 4) ? 'SMALL' : 'BIG';
+            let ai2Vote = (parseInt(list[0].number) <= 4) ? 'SMALL' : 'BIG';
+            const ai3Vote = (rawData.slice(0, 5).filter(x => x.size === 'SMALL').length >= 3) ? "SMALL" : "BIG";
 
-            // AI 3: Density
-            const smallCount = rawData.slice(0, 5).filter(x => x.size === 'SMALL').length;
-            const ai3Vote = smallCount >= 3 ? "SMALL" : "BIG";
-
-            // AI 4: Self-Correction
             const scanArea = rawData.slice(0, 20);
             const bigs = scanArea.filter(x => x.size === 'BIG').length;
             const smalls = scanArea.filter(x => x.size === 'SMALL').length;
@@ -165,11 +176,9 @@
             let bPoints = (ai1Vote === 'BIG' ? 30 : 0) + (ai2Vote === 'BIG' ? 30 : 0) + (ai3Vote === 'BIG' ? 10 : 0) + (ai4Vote === 'BIG' ? 30 : 0);
 
             const verdict = sPoints > bPoints ? "SMALL" : "BIG";
-            const confidence = Math.max(sPoints, bPoints);
-            const pool = verdict === "BIG" ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
-            const finalNums = pool.sort(() => .5 - Math.random()).slice(0, 2);
+            const finalNums = getSmartNumbers(list, verdict);
 
-            updateUI(nextP, verdict, finalNums, confidence);
+            updateUI(nextP, verdict, finalNums, Math.max(sPoints, bPoints));
             saveLog(nextP, verdict, finalNums, ai4Vote);
          }
 
@@ -180,7 +189,7 @@
             resEl.className = `text-5xl font-black italic mb-2 ${res === 'BIG' ? 'text-yellow-400' : 'text-pink-500'}`;
             document.getElementById('confidence-bar').style.width = conf + '%';
             document.getElementById('confidence-text').textContent = conf + '%';
-            document.getElementById('ai4-mode-display').textContent = ai4Mode;
+            document.getElementById('ai4-mode-display').textContent = ai4Mode + (ai4CycleStep > 0 ? ` (${ai4CycleStep}/3)` : "");
             document.getElementById('prediction-numbers').innerHTML = nums.map(n => 
                `<span class="w-8 h-8 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-sm font-bold">${n}</span>`
             ).join('');
@@ -188,14 +197,32 @@
 
          function updateHistoryWithResult(latest) {
             const actualSize = parseInt(latest.number) <= 4 ? 'SMALL' : 'BIG';
+            const actualNum = parseInt(latest.number);
+
             historyDB.forEach(item => {
                if (item.period === latest.issueNumber && item.status === 'pending') {
-                  item.status = (item.prediction === actualSize) ? 'WIN' : 'LOSS';
                   item.actualNum = latest.number;
-                  if (item.ai4Vote !== actualSize) {
-                     ai4LossStreak++;
-                     if (ai4LossStreak >= 2) { ai4Mode = (ai4Mode === "TREND") ? "BALANCING" : "TREND"; ai4LossStreak = 0; }
-                  } else { ai4LossStreak = 0; }
+                  
+                  // JACKPOT CHECK 🎰
+                  if (item.numbers.includes(actualNum)) {
+                     item.status = 'JACKPOT 🎰';
+                  } else {
+                     item.status = (item.prediction === actualSize) ? 'WIN' : 'LOSS';
+                  }
+                  
+                  // AI 4 CYCLE Logic
+                  if (ai4Mode === "TREND" && ai4CycleStep === 0) {
+                     if (item.ai4Vote !== actualSize) {
+                        ai4LossStreak++;
+                        if (ai4LossStreak >= 2) { ai4Mode = "BALANCING"; ai4CycleStep = 1; ai4LossStreak = 0; }
+                     } else { ai4LossStreak = 0; }
+                  } else {
+                     ai4CycleStep++;
+                     if (ai4CycleStep > 3) {
+                        ai4Mode = (ai4Mode === "BALANCING") ? "TREND" : "BALANCING";
+                        ai4CycleStep = 1;
+                     }
+                  }
                }
             });
             renderHistory();
@@ -212,22 +239,22 @@
 
          function renderHistory() {
             const listEl = document.getElementById('history-list');
-            const wins = historyDB.filter(i => i.status === 'WIN').length;
-            const total = historyDB.filter(i => i.status === 'WIN' || i.status === 'LOSS').length;
+            const total = historyDB.filter(i => i.status !== 'pending' && i.status !== 'DATA').length;
+            const wins = historyDB.filter(i => i.status === 'WIN' || i.status === 'JACKPOT 🎰').length;
             document.getElementById('accuracy').textContent = total > 0 ? Math.round((wins/total)*100)+'%' : '0%';
             
             listEl.innerHTML = historyDB.map(item => `
-               <div class="p-4 flex justify-between items-center ${item.status === 'WIN' ? 'bg-green-500/5' : item.status === 'LOSS' ? 'bg-red-500/5' : 'bg-white/5'}">
+               <div class="p-4 flex justify-between items-center ${item.status.includes('JACKPOT') ? 'bg-yellow-500/10' : item.status === 'WIN' ? 'bg-green-500/5' : item.status === 'LOSS' ? 'bg-red-500/5' : 'bg-white/5'}">
                   <div>
                      <div class="text-[10px] text-gray-500 tracking-tighter">PERIOD: ${item.period.slice(-4)}</div>
                      <div class="font-bold ${item.prediction === 'BIG' ? 'text-yellow-400' : item.prediction === 'SMALL' ? 'text-pink-500' : 'text-gray-400'}">${item.prediction}</div>
                   </div>
                   <div class="text-center">
-                     <div class="text-[9px] text-gray-400 uppercase">Num</div>
+                     <div class="text-[9px] text-gray-400">NUM</div>
                      <div class="text-lg font-bold">${item.actualNum}</div>
                   </div>
                   <div class="text-right">
-                     <div class="text-[10px] font-bold ${item.status === 'WIN' ? 'text-green-500' : item.status === 'LOSS' ? 'text-red-500' : 'text-blue-400'}">${item.status}</div>
+                     <div class="text-[10px] font-bold ${item.status.includes('JACKPOT') ? 'text-yellow-400' : item.status === 'WIN' ? 'text-green-500' : item.status === 'LOSS' ? 'text-red-500' : 'text-blue-400'}">${item.status}</div>
                      <div class="text-[8px] text-gray-600 tracking-widest">${item.numbers.join(', ')}</div>
                   </div>
                </div>
@@ -237,6 +264,7 @@
          function clearHistory() {
             historyDB = [];
             localStorage.removeItem('genesis_v8_db');
+            ai4Mode = "TREND"; ai4LossStreak = 0; ai4CycleStep = 0;
             fetchAndRecoverData();
          }
 
